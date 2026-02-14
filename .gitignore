@@ -1,0 +1,7 @@
+# 二进制文件
+*.exe
+app
+libreassistant2api-*
+
+# 配置文件（包含敏感信息）
+config.json
