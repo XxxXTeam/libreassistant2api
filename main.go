@@ -793,11 +793,18 @@ func convertStreamChunk(dataStr string) string {
 		if !ok {
 			continue
 		}
+		delete(choiceMap, "native_finish_reason")
 
 		delta, ok := choiceMap["delta"].(map[string]interface{})
 		if !ok {
 			continue
 		}
+
+		/*
+		 * 从 reasoning_details 中提取并拼接所有思考文本
+		 * 跳过 reasoning.encrypted 类型（加密的推理数据，不可用）
+		 */
+		var reasoningParts []string
 		if reasoningDetails, ok := delta["reasoning_details"].([]interface{}); ok {
 			for _, detail := range reasoningDetails {
 				detailMap, ok := detail.(map[string]interface{})
@@ -806,13 +813,15 @@ func convertStreamChunk(dataStr string) string {
 				}
 				detailType, _ := detailMap["type"].(string)
 				if detailType != "reasoning.encrypted" {
-					if text, ok := detailMap["text"].(string); ok {
-						delta["reasoning_content"] = text
+					if text, ok := detailMap["text"].(string); ok && text != "" {
+						reasoningParts = append(reasoningParts, text)
 					}
 				}
 			}
 		}
-		if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
+		if len(reasoningParts) > 0 {
+			delta["reasoning_content"] = strings.Join(reasoningParts, "")
+		} else if reasoning, ok := delta["reasoning"].(string); ok && reasoning != "" {
 			delta["reasoning_content"] = reasoning
 		}
 		delete(delta, "reasoning")
@@ -820,12 +829,7 @@ func convertStreamChunk(dataStr string) string {
 		delete(delta, "annotations")
 	}
 	delete(chunk, "provider")
-	delete(chunk, "native_finish_reason")
-	for _, choice := range choices {
-		if choiceMap, ok := choice.(map[string]interface{}); ok {
-			delete(choiceMap, "native_finish_reason")
-		}
-	}
+	cleanUsage(chunk)
 
 	result, err := json.Marshal(chunk)
 	if err != nil {
@@ -915,6 +919,7 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response) (int64,
 }
 func convertResponseReasoning(respMap map[string]interface{}) {
 	delete(respMap, "provider")
+	cleanUsage(respMap)
 
 	choices, ok := respMap["choices"].([]interface{})
 	if !ok {
@@ -930,6 +935,12 @@ func convertResponseReasoning(respMap map[string]interface{}) {
 		if !ok {
 			continue
 		}
+
+		/*
+		 * 从 reasoning_details 中提取并拼接所有思考文本
+		 * 跳过 reasoning.encrypted 类型（加密的推理数据，不可用）
+		 */
+		var reasoningParts []string
 		if reasoningDetails, ok := message["reasoning_details"].([]interface{}); ok {
 			for _, detail := range reasoningDetails {
 				detailMap, ok := detail.(map[string]interface{})
@@ -938,19 +949,40 @@ func convertResponseReasoning(respMap map[string]interface{}) {
 				}
 				detailType, _ := detailMap["type"].(string)
 				if detailType != "reasoning.encrypted" {
-					if text, ok := detailMap["text"].(string); ok {
-						message["reasoning_content"] = text
+					if text, ok := detailMap["text"].(string); ok && text != "" {
+						reasoningParts = append(reasoningParts, text)
 					}
 				}
 			}
 		}
-		if reasoning, ok := message["reasoning"].(string); ok && reasoning != "" {
+
+		/* 优先使用 reasoning_details 拼接结果，回退到 reasoning 字段 */
+		if len(reasoningParts) > 0 {
+			message["reasoning_content"] = strings.Join(reasoningParts, "")
+		} else if reasoning, ok := message["reasoning"].(string); ok && reasoning != "" {
 			message["reasoning_content"] = reasoning
 		}
 		delete(message, "reasoning")
 		delete(message, "reasoning_details")
 		delete(message, "annotations")
+		delete(message, "refusal")
 	}
+}
+
+/*
+ * cleanUsage 清理 usage 中的非 OpenAI 标准字段
+ * 保留：prompt_tokens, completion_tokens, total_tokens, completion_tokens_details
+ * 移除：cost, is_byok, cost_details, prompt_tokens_details 等上游附加字段
+ */
+func cleanUsage(respMap map[string]interface{}) {
+	usage, ok := respMap["usage"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	delete(usage, "cost")
+	delete(usage, "is_byok")
+	delete(usage, "cost_details")
+	delete(usage, "prompt_tokens_details")
 }
 func sendError(w http.ResponseWriter, message string, errType string, status int) {
 	w.Header().Set("Content-Type", "application/json")
